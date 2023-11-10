@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn as nn
 from modules import Generator, Discriminator
 import wandb
 
@@ -20,6 +21,10 @@ class Stargan(object):
 
         self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.config.g_lr, [self.config.beta1, self.config.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.config.d_lr, [self.config.beta1, self.config.beta2])
+        
+        self.cross_entropy = nn.CrossEntropy()
+        self.l1 = nn.L1()
+        
         self.print_network(self.G, 'G')
         self.print_network(self.D, 'D')
             

@@ -49,7 +49,7 @@ class Solver(object):
 
     def classification_loss(self, logit, target):
         """Compute softmax cross entropy loss."""
-        return F.cross_entropy(logit, target) 
+        return F.cross_entropy(logit, target) # This could be passed as CrossEntropy()
 
     def train(self):
         """Train StarGAN within a single dataset."""
@@ -148,7 +148,9 @@ class Solver(object):
 
                 # Target-to-original domain.
                 x_reconst = self.model.G(x_fake, c_org)
-                g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
+                g_loss_rec = torch.mean(torch.abs(x_real - x_reconst)) # This is just an L1 loss
+                # TODO try out feeding this loss to discriminator instead of generator,
+                # cycle loss will be erased ? 
 
                 # Backward and optimize.
                 g_loss = g_loss_fake + self.config.lambda_rec * g_loss_rec + self.config.lambda_cls * g_loss_cls
@@ -208,6 +210,51 @@ class Solver(object):
                 "g_lr": self.config.g_lr
             })
           
+    def val(self):
+        # Get a batch of validation data
+        # NOTE just a batch, all do I need to iter through all of the val data?
+        val_loader = self.model.val_loader
+    
+        total_val_loss = 0
+        with torch.no_grad():
+            for i, (x_real, label_org) in enumerate(val_loader)
+
+                # Preprocess input
+                # Generate target domain labels randomly.
+                rand_idx = torch.randperm(label_org.size(0))
+                label_trg = label_org[rand_idx]
+
+                c_org = label2onehot(label_org, self.config.c_dim)
+                c_trg = label2onehot(label_trg, self.config.c_dim)
+
+                x_real = x_real.to(self.config.device)           # Input images.
+                c_org = c_org.to(self.config.device)             # Original domain labels.
+                c_trg = c_trg.to(self.config.device)             # Target domain labels.
+                label_org = label_org.to(self.config.device)     # Labels for computing classification loss.
+                label_trg = label_trg.to(self.config.device)     # Labels for computing classification loss.
+
+
+                # Compute losses
+                x_fake = self.model.G(x_real, c_trg)
+                out_src, out_cls = self.model.D(x_fake)
+                g_loss_fake = - torch.mean(out_src)
+                g_loss_cls = self.classification_loss(out_cls, label_trg)
+
+                # Target-to-original domain.
+                x_reconst = self.model.G(x_fake, c_org)
+                g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
+
+                # Backward and optimize.
+                g_loss = g_loss_fake + self.config.lambda_rec * g_loss_rec + self.config.lambda_cls * g_loss_cls
+
+            # Aggregate val_loss through one batch
+            total_val_loss += g_loss
+
+        # Calculate mean
+        mean_total_val_loss = total_val_loss / len(val_loader)
+
+        # Log loss
+        wandb.log({"val_loss": mean_total_val_loss})
 
     def test(self):
         """Translate images using StarGAN trained on a single dataset."""
