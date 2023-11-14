@@ -11,7 +11,9 @@ class Stargan(object):
         
         # Build the model and tensorboard.
         self.build_model()
-        self.setup_logger()
+        if self.config.wandb:
+            print(self.config.wandb)
+            self.setup_logger()
 
 
     def build_model(self):
@@ -22,8 +24,8 @@ class Stargan(object):
         self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.config.g_lr, [self.config.beta1, self.config.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.config.d_lr, [self.config.beta1, self.config.beta2])
         
-        self.cross_entropy = nn.CrossEntropy()
-        self.l1 = nn.L1()
+        # self.cross_entropy = nn.CrossEntropy()
+        # self.l1 = nn.L1()
         
         self.print_network(self.G, 'G')
         self.print_network(self.D, 'D')
@@ -75,3 +77,13 @@ class Stargan(object):
 
             # Ensure DEVICE is tracked in WandB
             wandb.config.update({"device": self.config.device})
+
+    def he_init(module):
+        if isinstance(module, nn.Conv2d):
+            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)

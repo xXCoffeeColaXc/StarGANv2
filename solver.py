@@ -1,10 +1,6 @@
-from modules import Generator
-from modules import Discriminator
-from torch.autograd import Variable
 from torchvision.utils import save_image
 import torch
 import torch.nn.functional as F
-import numpy as np
 import os
 import time
 import datetime
@@ -46,10 +42,74 @@ class Solver(object):
         dydx = dydx.view(dydx.size(0), -1)
         dydx_l2norm = torch.sqrt(torch.sum(dydx**2, dim=1))
         return torch.mean((dydx_l2norm-1)**2)
+    
+    def preprocess_input_data(self, x_real, label_org):
+        # Generate target domain labels randomly.
+        rand_idx = torch.randperm(label_org.size(0))
+        label_trg = label_org[rand_idx]
+
+        c_org = label2onehot(label_org, self.config.c_dim)
+        c_trg = label2onehot(label_trg, self.config.c_dim)
+
+        x_real = x_real.to(self.config.device)           # Input images.
+        c_org = c_org.to(self.config.device)             # Original domain labels.
+        c_trg = c_trg.to(self.config.device)             # Target domain labels.
+        label_org = label_org.to(self.config.device)     # Labels for computing classification loss.
+        label_trg = label_trg.to(self.config.device)     # Labels for computing classification loss.
+
+        return x_real, c_org, c_trg, label_org, label_trg
 
     def classification_loss(self, logit, target):
         """Compute softmax cross entropy loss."""
         return F.cross_entropy(logit, target) # This could be passed as CrossEntropy()
+    
+    def adv_loss(logits, target):
+        # NOTE better way thats for sure, find a way to use it.
+        assert target in [1, 0]
+        targets = torch.full_like(logits, fill_value=target)
+        loss = F.binary_cross_entropy_with_logits(logits, targets)
+        return loss
+    
+    def compute_d_loss(self, x_real, label_org, c_trg):
+        # Compute loss with real images.
+        out_src, out_cls = self.model.D(x_real)
+        d_loss_real = - torch.mean(out_src) # loss_real = adv_loss(out, 1)
+        d_loss_cls = self.classification_loss(out_cls, label_org)
+
+        # Compute loss with fake images.
+        x_fake = self.model.G(x_real, c_trg)
+        out_src, out_cls = self.model.D(x_fake.detach())
+        d_loss_fake = torch.mean(out_src) # loss_fake = adv_loss(out, 0)
+
+        # Compute loss for gradient penalty.
+        alpha = torch.rand(x_real.size(0), 1, 1, 1).to(self.config.device)
+        x_hat = (alpha * x_real.data + (1 - alpha) * x_fake.data).requires_grad_(True)
+        out_src, _ = self.model.D(x_hat)
+        d_loss_gp = self.gradient_penalty(out_src, x_hat)
+
+        # Backward and optimize.
+        d_loss = d_loss_real + d_loss_fake + self.config.lambda_cls * d_loss_cls + self.config.lambda_gp * d_loss_gp
+    
+        # NOTE best practice: return d_loss, Object(d_loss_real, d_loss_fake, d_loss_cls, d_loss_gp)
+        return d_loss, d_loss_real, d_loss_fake, d_loss_cls, d_loss_gp
+
+    def compute_g_loss(self, x_real, c_org, label_trg, c_trg):
+        # Original-to-target domain.
+        x_fake = self.model.G(x_real, c_trg)
+        out_src, out_cls = self.model.D(x_fake)
+        g_loss_fake = - torch.mean(out_src) # loss_adv = adv_loss(out, 1)
+        g_loss_cls = self.classification_loss(out_cls, label_trg)
+
+        # Target-to-original domain.
+        x_reconst = self.model.G(x_fake, c_org)
+        g_loss_rec = torch.mean(torch.abs(x_real - x_reconst)) # This is just an L1 loss
+        # TODO try out feeding this loss to discriminator instead of generator,
+        # cycle loss will be erased ? 
+
+        # Backward and optimize.
+        g_loss = g_loss_fake + self.config.lambda_rec * g_loss_rec + self.config.lambda_cls * g_loss_cls
+        
+        return g_loss, g_loss_fake, g_loss_rec, g_loss_cls
 
     def train(self):
         """Train StarGAN within a single dataset."""
@@ -88,41 +148,14 @@ class Solver(object):
                 data_iter = iter(data_loader)
                 x_real, label_org = next(data_iter)
 
-            # Generate target domain labels randomly.
-            rand_idx = torch.randperm(label_org.size(0))
-            label_trg = label_org[rand_idx]
-
-            c_org = label2onehot(label_org, self.config.c_dim)
-            c_trg = label2onehot(label_trg, self.config.c_dim)
-
-            x_real = x_real.to(self.config.device)           # Input images.
-            c_org = c_org.to(self.config.device)             # Original domain labels.
-            c_trg = c_trg.to(self.config.device)             # Target domain labels.
-            label_org = label_org.to(self.config.device)     # Labels for computing classification loss.
-            label_trg = label_trg.to(self.config.device)     # Labels for computing classification loss.
+            x_real, c_org, c_trg, label_org, label_trg = self.preprocess_input_data(x_real, label_org)
 
             # =================================================================================== #
             #                             2. Train the discriminator                              #
             # =================================================================================== #
 
-            # Compute loss with real images.
-            out_src, out_cls = self.model.D(x_real)
-            d_loss_real = - torch.mean(out_src)
-            d_loss_cls = self.classification_loss(out_cls, label_org)
+            d_loss, d_loss_real, d_loss_fake, d_loss_cls, d_loss_gp = self.compute_d_loss(x_real, label_org, c_trg)
 
-            # Compute loss with fake images.
-            x_fake = self.model.G(x_real, c_trg)
-            out_src, out_cls = self.model.D(x_fake.detach())
-            d_loss_fake = torch.mean(out_src)
-
-            # Compute loss for gradient penalty.
-            alpha = torch.rand(x_real.size(0), 1, 1, 1).to(self.config.device)
-            x_hat = (alpha * x_real.data + (1 - alpha) * x_fake.data).requires_grad_(True)
-            out_src, _ = self.model.D(x_hat)
-            d_loss_gp = self.gradient_penalty(out_src, x_hat)
-
-            # Backward and optimize.
-            d_loss = d_loss_real + d_loss_fake + self.config.lambda_cls * d_loss_cls + self.config.lambda_gp * d_loss_gp
             self.reset_grad()
             d_loss.backward()
             self.model.d_optimizer.step()
@@ -140,20 +173,9 @@ class Solver(object):
             # =================================================================================== #
             
             if (i+1) % self.config.n_critic == 0:
-                # Original-to-target domain.
-                x_fake = self.model.G(x_real, c_trg)
-                out_src, out_cls = self.model.D(x_fake)
-                g_loss_fake = - torch.mean(out_src)
-                g_loss_cls = self.classification_loss(out_cls, label_trg)
+                
+                g_loss, g_loss_fake, g_loss_rec, g_loss_cls = self.compute_g_loss(x_real, c_org, label_trg, c_trg)
 
-                # Target-to-original domain.
-                x_reconst = self.model.G(x_fake, c_org)
-                g_loss_rec = torch.mean(torch.abs(x_real - x_reconst)) # This is just an L1 loss
-                # TODO try out feeding this loss to discriminator instead of generator,
-                # cycle loss will be erased ? 
-
-                # Backward and optimize.
-                g_loss = g_loss_fake + self.config.lambda_rec * g_loss_rec + self.config.lambda_cls * g_loss_cls
                 self.reset_grad()
                 g_loss.backward()
                 self.model.g_optimizer.step()
@@ -176,6 +198,10 @@ class Solver(object):
                 for tag, value in loss.items():
                     log += ", {}: {:.4f}".format(tag, value)
                 print(log)
+
+            # # Calculate and Log validation loss
+            # if (i+1) % self.config.validation_step == 0: # TODO Validation step
+            #     self.validate()
             
             # Translate fixed images for debugging.
             if (i+1) % self.config.sample_step == 0:
@@ -203,58 +229,45 @@ class Solver(object):
                 self.update_lr(g_lr, d_lr)
                 print ('Decayed learning rates, g_lr: {}, d_lr: {}.'.format(g_lr, d_lr))
 
-            # Log to wandb
-            wandb.log(loss)
-            wandb.log({
-                "d_lr": self.config.d_lr,
-                "g_lr": self.config.g_lr
-            })
+            if self.config.wandb:
+                # Log to wandb
+                wandb.log(loss)
+                wandb.log({
+                    "d_lr": self.config.d_lr,
+                    "g_lr": self.config.g_lr
+                })
           
-    def val(self):
+    def validate(self):
         # Get a batch of validation data
         # NOTE just a batch, all do I need to iter through all of the val data?
         val_loader = self.model.val_loader
+
+        self.model.D.eval()
+        self.model.G.eval()
     
         total_val_loss = 0
+        num_batches = 0
+
         with torch.no_grad():
-            for i, (x_real, label_org) in enumerate(val_loader)
+            for i, (x_real, label_org) in enumerate(val_loader):
 
-                # Preprocess input
-                # Generate target domain labels randomly.
-                rand_idx = torch.randperm(label_org.size(0))
-                label_trg = label_org[rand_idx]
+                x_real, c_org, c_trg, label_org, label_trg = self.preprocess_input_data(x_real, label_org)
 
-                c_org = label2onehot(label_org, self.config.c_dim)
-                c_trg = label2onehot(label_trg, self.config.c_dim)
+                g_loss, _, _, _ = self.compute_g_loss(x_real, c_org, label_trg, c_trg)
 
-                x_real = x_real.to(self.config.device)           # Input images.
-                c_org = c_org.to(self.config.device)             # Original domain labels.
-                c_trg = c_trg.to(self.config.device)             # Target domain labels.
-                label_org = label_org.to(self.config.device)     # Labels for computing classification loss.
-                label_trg = label_trg.to(self.config.device)     # Labels for computing classification loss.
-
-
-                # Compute losses
-                x_fake = self.model.G(x_real, c_trg)
-                out_src, out_cls = self.model.D(x_fake)
-                g_loss_fake = - torch.mean(out_src)
-                g_loss_cls = self.classification_loss(out_cls, label_trg)
-
-                # Target-to-original domain.
-                x_reconst = self.model.G(x_fake, c_org)
-                g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
-
-                # Backward and optimize.
-                g_loss = g_loss_fake + self.config.lambda_rec * g_loss_rec + self.config.lambda_cls * g_loss_cls
-
-            # Aggregate val_loss through one batch
-            total_val_loss += g_loss
+                # Aggregate val_loss through one batch
+                total_val_loss += g_loss.item()
+                num_batches += 1
 
         # Calculate mean
-        mean_total_val_loss = total_val_loss / len(val_loader)
+        average_val_loss = total_val_loss / num_batches
 
-        # Log loss
-        wandb.log({"val_loss": mean_total_val_loss})
+        self.model.D.train()
+        self.model.G.train()
+
+        if self.config.wandb:
+            # Log loss
+            wandb.log({"val_loss": average_val_loss})
 
     def test(self):
         """Translate images using StarGAN trained on a single dataset."""
@@ -280,3 +293,4 @@ class Solver(object):
                 result_path = os.path.join(self.config.result_dir, '{}-images.jpg'.format(i+1))
                 save_image(denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
                 print('Saved real and fake images into {}...'.format(result_path))
+

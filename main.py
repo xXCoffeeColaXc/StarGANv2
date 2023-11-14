@@ -32,8 +32,9 @@ def main(config):
     elif config.mode == 'test':
         solver.test()
 
-    # Finish the WandB run when you're done training
-    wandb.finish() # NOTE reallocate this
+    if config.wandb:
+        # Finish the WandB run when you're done training
+        wandb.finish() # NOTE reallocate this
     
 
 if __name__ == '__main__':
@@ -65,10 +66,11 @@ if __name__ == '__main__':
 
     # Test configuration.
     parser.add_argument('--test_iters', type=int, default=200000, help='test model from this step')
+    parser.add_argument('--wandb', type=int, choices=[0, 1], help='enable wandb logging (0 for False, 1 for True)')
 
     # Miscellaneous.
     parser.add_argument('--num_workers', type=int, default=1)
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test']) # TODO add val
 
     # Directories.
     parser.add_argument('--image_dir', type=str, default='/media/talmacsi/48a93eb4-f27d-48ec-9f74-64e475c3b6ff/Downloads/rgb_anon_trainvaltest/rgb_anon')
@@ -80,6 +82,7 @@ if __name__ == '__main__':
     # Step size.
     parser.add_argument('--log_step', type=int, default=10)
     parser.add_argument('--sample_step', type=int, default=1000)
+    parser.add_argument('--validation_step', type=int, default=100)
     parser.add_argument('--model_save_step', type=int, default=10000)
     parser.add_argument('--lr_update_step', type=int, default=1000)
 

@@ -28,6 +28,7 @@ class Config(object):
 
         # Test configurations.
         self.test_iters = config.test_iters
+        self.wandb = config.wandb
 
         # Miscellaneous.
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -41,6 +42,7 @@ class Config(object):
         # Step size.
         self.log_step = config.log_step
         self.sample_step = config.sample_step
+        self.validation_step = config.validation_step
         self.model_save_step = config.model_save_step
         self.lr_update_step = config.lr_update_step
 
